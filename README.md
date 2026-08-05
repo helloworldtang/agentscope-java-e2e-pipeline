@@ -12,10 +12,11 @@
  → ④ Skill      wechat-format（doocs/md 排版知识，按需加载）
     + @Tool     render_wechat_html 确定性渲染成微信内联样式 HTML
  → ④.5 @Tool    validate_wechat_html 微信兼容性质量门
- → ⑤ 交付标题 + 摘要 + HTML
+ → ⑤ write_file  落本地 article.html（doocs/md 内联样式，可手动粘公众号）
+ → ⑥ @Tool       publish_to_wechat 投公众号草稿箱（设 PUBLISH_ACCOUNT 才启用，否则跳过）
 ```
 
-底层全靠 ReAct 的 **function call**：MCP / Skill / SubAgent 都通过 `tool_call` 触发（间接），`PublisherToolkit` 里 3 个 `@Tool` 是我们亲手写的（直接）。
+底层全靠 ReAct 的 **function call**：MCP / Skill / SubAgent 都通过 `tool_call` 触发（间接），`PublisherToolkit` 里 4 个 `@Tool` 是我们亲手写的（直接）。
 
 ## 能力对照
 
@@ -26,7 +27,8 @@
 | **Skill** | `wechat-format`（doocs/md 排版知识，workspace 自动加载） | `workspace/skills/wechat-format/SKILL.md` |
 | **MCP** | exomind `mcp` stdio 服务（workspace `tools.json` 自动加载） | `workspace/tools.json` |
 | **SubAgent** | `content-writer` 撰稿员（程序化声明，自动注册 spawn 委派工具） | `WeChatPublisher.java` + `workspace/subagents/content-writer.md` |
-| **Function Call (@Tool)** | `estimate_readtime` / `render_wechat_html` / `validate_wechat_html` | `PublisherToolkit.java` |
+| **Function Call (@Tool)** | `estimate_readtime` / `render_wechat_html` / `validate_wechat_html` / `publish_to_wechat` | `PublisherToolkit.java` |
+| **发布闭环（可选）** | `publish_to_wechat` → exomind `POST /drafts` 注入正文 + `draft wechat` 调微信草稿箱（`PUBLISH_ACCOUNT` 门控） | `PublisherToolkit.java` |
 
 ## 几个源码核实出来的关键决策（避坑）
 
@@ -58,9 +60,17 @@ mvn exec:java
 
 # 或自带选题
 mvn exec:java -Dexec.args="写一篇讲 RAG 在企业落地踩坑的公众号文章"
+
+# 闭环投递到公众号草稿箱：设 PUBLISH_ACCOUNT 后，pipeline 末尾自动调 publish_to_wechat
+# export PUBLISH_ACCOUNT=ailang   # ailang/danxin/mingdeng，需 exomind 已 login
 ```
 
-运行时会实时打印模型的流式文本和每次 `🔧 工具调用`（function call 可见）。Agent 最终交付文本写到 `.agentscope/workspace/output/agent_deliverable.md`。
+运行时会实时打印模型的流式文本和每次 `🔧 工具调用`（function call 可见）。产物：
+- `.agentscope/workspace/publisher/output/article.html` —— doocs/md 内联样式 HTML（可手动粘公众号）
+- `.agentscope/workspace/output/agent_deliverable.md` —— agent 最终交付文本
+- 设了 `PUBLISH_ACCOUNT` 时，还会把 Markdown 正文投到对应公众号草稿箱（不群发，后台手动发）
+
+> **发布闭环说明**：`publish_to_wechat` 发给 exomind 的是 **Markdown 正文**（exomind 负责最终渲染 + AI 出封面 + 调微信）；本地 `article.html` 是我们 `render_wechat_html` 的 doocs/md 排版产物，供手动粘贴/核对，两者渲染路径独立。
 
 ## 依赖
 

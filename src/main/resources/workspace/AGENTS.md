@@ -25,10 +25,11 @@
    - 再调用 `render_wechat_html` 工具，把 Markdown 正文确定性渲染成带内联样式的微信 HTML；
    - 然后调用 `validate_wechat_html` 工具做微信兼容性质量门；若有问题，修正后重渲。
 
-5. **交付**
-   校验通过后，**立刻**用 `write_file` 工具把最终 HTML 写到 `output/article.html`（相对 workspace 根）——
-   不要等用户确认才写。然后把「标题 + 摘要（含本文约 X 字，预计阅读 Y 分钟）+ output/article.html 路径」
-   作为结果交付给用户。
+5. **交付 + 闭环投递**
+   校验通过后：① 用 `write_file` 把最终 HTML 写到 `output/article.html`（相对 workspace 根）；② 调
+   `publish_to_wechat` 工具，把「标题 + Markdown 正文」投递到公众号草稿箱（未设 `PUBLISH_ACCOUNT`
+   环境变量会自动 SKIP、仅留本地文件，不算失败）；③ 把「标题 + 摘要（含本文约 X 字，预计阅读 Y 分钟）
+   + output/article.html 路径 + 投递结果」交付给用户。
 
 ## 原则
 

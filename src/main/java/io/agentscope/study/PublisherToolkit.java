@@ -1,9 +1,22 @@
 package io.agentscope.study;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.agentscope.core.tool.Tool;
 import io.agentscope.core.tool.ToolParam;
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.TimeUnit;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import org.commonmark.node.Node;
@@ -163,6 +176,95 @@ public class PublisherToolkit {
             warnings.forEach(w -> sb.append("  ⚠ ").append(w).append('\n'));
         }
         return sb.toString().trim();
+    }
+
+    /**
+     * 工具四：把文章投递到公众号草稿箱，闭环流水线「发」的一端。
+     *
+     * <p>复用 exomind：① POST /drafts 注入 Markdown 正文（CLI 没有 import 正文这步走 HTTP） ② 子进程调
+     * {@code exomind draft wechat} 复用其「AI 出封面 + 调微信」链路。 受环境变量
+     * {@code PUBLISH_ACCOUNT} 门控：未设置则 SKIP，只留本地 article.html，避免每次跑都往草稿箱堆文章。
+     *
+     * <p>注意：发给 exomind 的是 Markdown 正文（exomind 负责最终渲染+封面+调微信）；本地
+     * article.html 是我们 render_wechat_html 的 doocs/md 排版产物，供手动粘贴/核对。
+     */
+    @Tool(
+            name = "publish_to_wechat",
+            description =
+                    "把文章投递到公众号草稿箱（经 exomind：注入正文+AI出封面+调微信，不群发）。"
+                            + "需先设置环境变量 PUBLISH_ACCOUNT（公众号名，如 ailang）；未设置则自动跳过。"
+                            + "返回 media_id（前缀 T1NF 表示真投成功）。标题用文章主标题，markdown 用完整 Markdown 正文。")
+    public String publishToWechat(
+            @ToolParam(name = "title", description = "文章标题") String title,
+            @ToolParam(name = "markdown", description = "完整 Markdown 正文") String markdown) {
+        String account = System.getenv("PUBLISH_ACCOUNT");
+        if (account == null || account.isBlank()) {
+            return "SKIP: 未设置 PUBLISH_ACCOUNT 环境变量，发布已跳过（仅产出本地 article.html）。"
+                    + "如需投递，设置 PUBLISH_ACCOUNT=<公众号名> 后重跑。";
+        }
+        try {
+            // 读 exomind 凭据（~/.exomind/config.json）
+            Path cfg = Paths.get(System.getProperty("user.home"), ".exomind", "config.json");
+            if (!Files.isRegularFile(cfg)) {
+                return "SKIP: 未找到 ~/.exomind/config.json（exomind 未登录），发布已跳过。";
+            }
+            ObjectMapper om = new ObjectMapper();
+            JsonNode cred = om.readTree(Files.readString(cfg));
+            String base = cred.get("base_url").asText();
+            String apiKey = cred.get("api_key").asText();
+
+            // ① POST /drafts 注入 Markdown 正文
+            ObjectNode body = om.createObjectNode();
+            body.put("title", title);
+            body.put("content", markdown);
+            body.put("target_account", account);
+            body.put("topic", title);
+            body.set("tags", om.createArrayNode().add("AgentScope Java").add("Agent"));
+
+            HttpClient client = HttpClient.newHttpClient();
+            HttpRequest req =
+                    HttpRequest.newBuilder()
+                            .uri(URI.create(base + "/drafts"))
+                            .timeout(java.time.Duration.ofSeconds(30))
+                            .header("Authorization", "Bearer " + apiKey)
+                            .header("Content-Type", "application/json")
+                            .POST(HttpRequest.BodyPublishers.ofString(om.writeValueAsString(body)))
+                            .build();
+            HttpResponse<String> res = client.send(req, HttpResponse.BodyHandlers.ofString());
+            if (res.statusCode() >= 300) {
+                return "FAIL: POST /drafts HTTP " + res.statusCode() + " "
+                        + res.body().substring(0, Math.min(200, res.body().length()));
+            }
+            String draftId = om.readTree(res.body()).get("id").asText();
+
+            // ② exomind draft wechat <id> --account <account>（AI 异步出封面 + 调微信，落到草稿箱不群发）
+            Process process =
+                    new ProcessBuilder(
+                                    "exomind", "draft", "wechat", draftId, "--account", account)
+                            .redirectErrorStream(true)
+                            .start();
+            boolean done = process.waitFor(3, TimeUnit.MINUTES);
+            String out =
+                    new String(process.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
+            if (!done) {
+                process.destroyForcibly();
+                return "FAIL: exomind draft wechat 超时 3min。output: "
+                        + out.substring(0, Math.min(300, out.length()));
+            }
+            Matcher m = Pattern.compile("media_id[:：]\\s*([A-Za-z0-9_-]+)").matcher(out);
+            if (!m.find()) {
+                return "FAIL: 未解析到 media_id。output: "
+                        + out.substring(0, Math.min(300, out.length()));
+            }
+            String mediaId = m.group(1);
+            boolean published = mediaId.startsWith("T1NF");
+            return String.format(
+                    "已投递到【%s】草稿箱（不群发，需后台手动发）。media_id=%s，published=%s"
+                            + "（T1NF 前缀=真投成功）。草稿 id=%s。后台: 内容与互动→草稿箱",
+                    account, mediaId, published, draftId);
+        } catch (Exception e) {
+            return "ERROR: 发布失败：" + e.getMessage();
+        }
     }
 
     // ===== 内联样式注入辅助 =====

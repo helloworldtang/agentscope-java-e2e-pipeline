@@ -117,8 +117,10 @@ public class WeChatPublisher {
                                         + "③ 调 estimate_readtime 算字数 → "
                                         + "④ 加载 wechat-format 技能后调 render_wechat_html 排版，"
                                         + "再调 validate_wechat_html 质量门 → "
-                                        + "⑤ 校验通过后立刻用 write_file 把最终 HTML 写到 output/article.html，"
-                                        + "再交付标题+摘要+该路径。子 agent 上下文隔离，委派时务必带全素材。全程中文。")
+                                        + "⑤ 用 write_file 把最终 HTML 写到 output/article.html，"
+                                        + "再调 publish_to_wechat 把标题+Markdown 正文投递到公众号草稿箱（未设"
+                                        + " PUBLISH_ACCOUNT 会自动跳过、仅留本地文件），最后交付标题+摘要+路径。"
+                                        + "子 agent 上下文隔离，委派时务必带全素材。全程中文。")
                         .model(model)
                         .workspace(workspaceRoot)
                         .toolkit(toolkit)
@@ -133,7 +135,10 @@ public class WeChatPublisher {
         // 6) 跑一个选题（参数传入或用默认）
         String topic = args.length > 0 ? String.join(" ", args) : DEFAULT_TOPIC;
         RuntimeContext ctx =
-                RuntimeContext.builder().sessionId("demo-1").userId("demo").build();
+                RuntimeContext.builder()
+                        .sessionId("publisher-1")
+                        .userId("publisher")
+                        .build();
 
         System.out.println("================ 微信公众号排版 Agent ================");
         System.out.println("模型: " + modelName + " @ " + baseUrl);
