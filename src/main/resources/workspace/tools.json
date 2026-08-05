@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "exomind": {
+      "transport": "stdio",
+      "command": "exomind",
+      "args": ["mcp"],
+      "enableTools": ["query", "search"],
+      "initializationTimeout": "PT20S",
+      "timeout": "PT30S"
+    }
+  }
+}

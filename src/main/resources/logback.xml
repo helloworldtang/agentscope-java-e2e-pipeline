@@ -1,0 +1,22 @@
+<configuration>
+    <!-- 压住 Reactor / Netty / HTTP 客户端的噪音，只保留 agent 与我们自己的 INFO -->
+    <appender name="STDOUT" class="ch.qos.logback.core.ConsoleAppender">
+        <encoder>
+            <pattern>%d{HH:mm:ss.SSS} %-5level %logger{20} - %msg%n</pattern>
+        </encoder>
+    </appender>
+
+    <logger name="io.netty" level="WARN"/>
+    <logger name="reactor" level="WARN"/>
+    <logger name="io.projectreactor" level="WARN"/>
+    <logger name="org.apache.http" level="WARN"/>
+    <logger name="org.eclipse" level="WARN"/>
+    <logger name="io.modelcontextprotocol" level="WARN"/>
+
+    <!-- agentscope 框架的关键日志保留 INFO，便于看 skill/mcp/subagent 装配 -->
+    <logger name="io.agentscope" level="INFO"/>
+
+    <root level="WARN">
+        <appender-ref ref="STDOUT"/>
+    </root>
+</configuration>

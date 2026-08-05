@@ -1,0 +1,25 @@
+# 构建产物
+target/
+
+# 运行时产物（sessions/memory/output/skills-cache，含运行时检索到的知识库内容，不进库）
+.agentscope/
+
+# 日志
+*.log
+run.log
+
+# 环境变量 / 密钥（保留 .env.example 模板）
+.env
+.env.local
+
+# Claude Code 本地设置（环境特定，非项目运行所需）
+.claude/
+
+# IDE
+.idea/
+.vscode/
+*.iml
+
+# 操作系统
+.DS_Store
+Thumbs.db
