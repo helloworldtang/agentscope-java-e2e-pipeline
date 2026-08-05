@@ -1,6 +1,6 @@
-# AgentScope Java 2.0 端到端 Demo：微信公众号排版 Agent
+# AgentScope Java 2.0 端到端 Pipeline：微信公众号排版 Agent
 
-用 **AgentScope Java 2.0.0** 跑通一条端到端流水线，把 **ReActAgent + HarnessAgent + Skill + MCP + SubAgent + 自研 Function Call(@Tool)** 五大能力串在一个 demo 里，接 **DeepSeek**，场景是**微信公众号排版**。
+用 **AgentScope Java 2.0.0** 跑通一条端到端流水线，把 **ReActAgent + HarnessAgent + Skill + MCP + SubAgent + 自研 Function Call(@Tool)** 五大能力串在一个 pipeline 里，接 **DeepSeek**，场景是**微信公众号排版**。
 
 ## 流水线
 
@@ -19,7 +19,7 @@
 
 ## 能力对照
 
-| 能力 | 在 demo 里的落点 | 关键文件 |
+| 能力 | 在 pipeline 里的落点 | 关键文件 |
 |---|---|---|
 | **ReActAgent + HarnessAgent** | 一个 `HarnessAgent` 实例 = ReAct 内核 + Harness 外壳 | `WeChatPublisher.java` |
 | **DeepSeek 接入** | `OpenAIChatModel` 指向 deepseek base_url | `WeChatPublisher.java` |
@@ -30,13 +30,13 @@
 
 ## 几个源码核实出来的关键决策（避坑）
 
-1. **DeepSeek 不能用 `.model("deepseek:...")`**：`agentscope-core` 的 `DeepSeekCredential.getChatModelClass()` 故意抛 `UnsupportedOperationException`，源码注释钦定「用 `OpenAIChatModel` 指向 DeepSeek base URL」。所以 demo 用 `OpenAIChatModel.builder().apiKey(...).baseUrl("https://api.deepseek.com").modelName("deepseek-chat")`。
+1. **DeepSeek 不能用 `.model("deepseek:...")`**：`agentscope-core` 的 `DeepSeekCredential.getChatModelClass()` 故意抛 `UnsupportedOperationException`，源码注释钦定「用 `OpenAIChatModel` 指向 DeepSeek base URL」。所以 pipeline 用 `OpenAIChatModel.builder().apiKey(...).baseUrl("https://api.deepseek.com").modelName("deepseek-chat")`。
 
 2. **排版引擎是 Java `@Tool` 而不是 shell 脚本**：`HarnessAgent` 默认**只在沙箱文件系统下注册 shell 工具**（源码 `HarnessAgent.java:2326`），本地运行没有 shell，跑不了 python 脚本。所以把 doocs/md 规则的确定性渲染实现为 `render_wechat_html` Java 工具，Skill 负责知识、@Tool 负责引擎。
 
-3. **SubAgent 必须程序化声明**：纯 `HarnessAgent.builder().workspace()` **不会**自动扫描 `subagents/*.md`（`build()` 里 `subagentDeclarations` 仅由 `.subagent(...)` 填充）。所以 demo 在 Java 里用 `SubagentDeclaration.builder()...inlineAgentsBody(...)` 声明 content-writer；`subagents/content-writer.md` 仅作人类可读规格存档。
+3. **SubAgent 必须程序化声明**：纯 `HarnessAgent.builder().workspace()` **不会**自动扫描 `subagents/*.md`（`build()` 里 `subagentDeclarations` 仅由 `.subagent(...)` 填充）。所以 pipeline 在 Java 里用 `SubagentDeclaration.builder()...inlineAgentsBody(...)` 声明 content-writer；`subagents/content-writer.md` 仅作人类可读规格存档。
 
-4. **workspace 引导**：skills / tools.json 由 HarnessAgent 从 workspace 自动加载，但 workspace 必须是可写路径（要写 session/memory/产物）。demo 启动时把 `resources/workspace/*` 以 copy-if-absent 复制到 `.agentscope/workspace/`。
+4. **workspace 引导**：skills / tools.json 由 HarnessAgent 从 workspace 自动加载，但 workspace 必须是可写路径（要写 session/memory/产物）。pipeline 启动时把 `resources/workspace/*` 以 copy-if-absent 复制到 `.agentscope/workspace/`。
 
 ## 跑法
 
@@ -71,13 +71,13 @@ mvn exec:java -Dexec.args="写一篇讲 RAG 在企业落地踩坑的公众号文
 
 ## exomind：个人知识库 + 公众号写作投递引擎
 
-本 demo 的 MCP 素材源用的是 **[exomind](https://youhuale.cn)**（网站：https://youhuale.cn ）——一个个人知识库引擎：
+本 pipeline 的 MCP 素材源用的是 **[exomind](https://youhuale.cn)**（网站：https://youhuale.cn ）——一个个人知识库引擎：
 
-- **知识库**：通过 CLI / MCP / Skill 多层接入，把笔记、调研、经验沉淀成可检索的知识图谱；本 demo 里 agent 就是通过 exomind MCP 的 `query` / `search` 工具去取素材的（`workspace/tools.json` 里配的 `exomind mcp` stdio 服务）。
+- **知识库**：通过 CLI / MCP / Skill 多层接入，把笔记、调研、经验沉淀成可检索的知识图谱；本 pipeline 里 agent 就是通过 exomind MCP 的 `query` / `search` 工具去取素材的（`workspace/tools.json` 里配的 `exomind mcp` stdio 服务）。
 - **公众号写作投递**：内置写作引擎（基于知识库素材 + 号调性生成草稿）和投递链路（AI 出封面 + 调微信草稿箱），把「取素材 → 写稿 → 排版 → 投递」闭环。
 - 安装：`npm install -g exomind` 后 `exomind install` 配置 MCP/skill。
 
-> 本 demo 只用了 exomind 的 MCP 取素材能力；排版用的是自带 Skill + 自研 @Tool，投递未在本 demo 工程内闭环。
+> 本 pipeline 只用了 exomind 的 MCP 取素材能力；排版用的是自带 Skill + 自研 @Tool，投递未在本 pipeline 工程内闭环。
 
 ## 排版 skill 来源
 
