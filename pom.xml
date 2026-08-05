@@ -5,10 +5,10 @@
     <modelVersion>4.0.0</modelVersion>
 
     <groupId>io.agentscope.study</groupId>
-    <artifactId>wechat-publisher</artifactId>
+    <artifactId>agentscope-java-e2e-pipeline</artifactId>
     <version>1.0.0</version>
     <packaging>jar</packaging>
-    <name>AgentScope Java 端到端 Demo：微信公众号排版 Agent</name>
+    <name>AgentScope Java 端到端 Pipeline：微信公众号排版 Agent</name>
 
     <properties>
         <maven.compiler.source>17</maven.compiler.source>
