@@ -89,6 +89,35 @@ mvn exec:java -Dexec.args="写一篇讲 RAG 在企业落地踩坑的公众号文
 
 > 本 pipeline 只用了 exomind 的 MCP 取素材能力；排版用的是自带 Skill + 自研 @Tool，投递未在本 pipeline 工程内闭环。
 
+## 平台下发 skill（动态分发 demo）
+
+上面的 `wechat-format` 是**预置** skill（workspace 目录、build 时静态加载）。生产里更常见的是「agent 管理平台维护 skill 存储 → agent 拉取」的动态分发。AgentScope 把 skill 来源抽象成 `AgentSkillRepository`，官方提供 **Git / MySQL / PostgreSQL / Nacos** 等后端——docs 原话：**MySQL / PostgreSQL / Nacos 支持「管理后台 / 配置中心动态修改、立即生效」**。
+
+本 demo 用 **Git 仓库**做最轻量的平台下发演示（无需 DB / Nacos 基础设施）：
+
+```bash
+# ① 初始化本地 git skill 仓（=「平台」维护的 skill 存储），下发初始 skill A
+bash setup-skill-store.sh
+export SKILL_GIT_URL=file:///Users/you/path/to/agentscope-skill-store   # 用脚本输出的 URL
+
+# ② agent 从平台拉取 skill（GitSkillRepository，autoSync=true，每次读检查远端 HEAD 变化才 pull）
+PRINT_SKILLS_ONLY=1 mvn exec:java
+# → 📦 平台(git)下发的 skill: [platform-greet]
+
+# ③ 平台再下发一个 skill：往仓里 commit 一个新 SKILL.md（模拟控制台发布）
+cd $SKILL_STORE && mkdir -p skills/platform-recap && \
+  printf -- '---\nname: platform-recap\ndescription: 一句回顾\n---\n# 回顾\n' \
+  > skills/platform-recap/SKILL.md && git add -A && git commit -m "platform: 下发 platform-recap"
+
+# ④ agent 再拉一次 → 拿到新 skill
+PRINT_SKILLS_ONLY=1 mvn exec:java
+# → 📦 平台(git)下发的 skill: [platform-greet, platform-recap]
+```
+
+设了 `SKILL_GIT_URL`（且不设 `PRINT_SKILLS_ONLY`）时，平台下发的 skill 会和 workspace 预置 skill 一起挂到 HarnessAgent，agent 即可按需加载使用。
+
+> **动态化三层次**（源码核实）：① **预置**——workspace 静态加载；② **平台下发**——Git/MySQL/PG/**Nacos** 仓，agent 每次 build/session 拉取，平台改了下次生效（Nacos 带 listener/`AiService` 最接近实时推送）；③ **agent 自助创建**——`enableSkillManageTool` → `skill_manage`（`SkillManageTool.java:256`，6 个 action），运行时 CRUD，但同会话 catalog 静态、要下次 build 才进目录。换后端只换 `AgentSkillRepository` 实现，agent 主流程不动。
+
 ## 排版 skill 来源
 
 排版知识参考 GitHub 上 star >1K 的 [**doocs/md**](https://github.com/doocs/md)（~12.9K star，最主流的微信 Markdown 排版器）的内联样式规则，编码进 `wechat-format` skill 与 `render_wechat_html` 工具。

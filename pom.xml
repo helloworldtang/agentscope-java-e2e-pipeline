@@ -37,6 +37,13 @@
             <version>${agentscope.version}</version>
         </dependency>
 
+        <!-- 平台下发 skill：把远程/本地 git 仓当作 skill 存储（模拟 agent 管理平台维护的 skill 仓） -->
+        <dependency>
+            <groupId>io.agentscope</groupId>
+            <artifactId>agentscope-extensions-skill-git-repository</artifactId>
+            <version>${agentscope.version}</version>
+        </dependency>
+
         <!-- MCP stdio transport：连接本地 exomind mcp 服务 -->
         <dependency>
             <groupId>io.modelcontextprotocol.sdk</groupId>

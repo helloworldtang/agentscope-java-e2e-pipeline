@@ -7,6 +7,8 @@ import io.agentscope.core.event.ToolCallStartEvent;
 import io.agentscope.core.message.UserMessage;
 import io.agentscope.core.permission.PermissionContextState;
 import io.agentscope.core.permission.PermissionMode;
+import io.agentscope.core.skill.AgentSkill;
+import io.agentscope.core.skill.repository.GitSkillRepository;
 import io.agentscope.core.tool.Toolkit;
 import io.agentscope.extensions.model.openai.OpenAIChatModel;
 import io.agentscope.harness.agent.HarnessAgent;
@@ -95,6 +97,27 @@ public class WeChatPublisher {
         Toolkit toolkit = new Toolkit();
         toolkit.registerTool(new PublisherToolkit());
 
+        // 3.5) 平台下发 skill：从外部 git skill 仓加载（模拟 agent 管理平台维护的 skill 存储）。
+        //      SKILL_GIT_URL 未设则跳过（demo 退回 workspace 静态加载）。
+        //      PRINT_SKILLS_ONLY=1 只验证下发（打印平台 skill 列表）、不跑 agent，便于快速演示「下发」。
+        String skillGitUrl = System.getenv("SKILL_GIT_URL");
+        GitSkillRepository platformRepo = null;
+        if (skillGitUrl != null && !skillGitUrl.isBlank()) {
+            platformRepo = new GitSkillRepository(skillGitUrl, null, null, "platform-git", true);
+            List<AgentSkill> platformSkills = platformRepo.getAllSkills();
+            System.out.println(
+                    "📦 平台(git)下发的 skill: "
+                            + platformSkills.stream().map(AgentSkill::getName).sorted().toList());
+            if ("1".equals(System.getenv("PRINT_SKILLS_ONLY"))) {
+                System.out.println("(PRINT_SKILLS_ONLY=1 → 只验证平台下发，不跑 agent)");
+                platformRepo.close();
+                return;
+            }
+        } else if ("1".equals(System.getenv("PRINT_SKILLS_ONLY"))) {
+            System.out.println("✗ PRINT_SKILLS_ONLY=1 但未设 SKILL_GIT_URL。请先跑 setup-skill-store.sh。");
+            return;
+        }
+
         // 4) SubAgent 程序化声明（content-writer 撰稿员，继承父 DeepSeek 模型）
         SubagentDeclaration writer =
                 SubagentDeclaration.builder()
@@ -107,7 +130,7 @@ public class WeChatPublisher {
 
         // 5) HarnessAgent（= ReAct 内核 + Harness 外壳）：挂 workspace（自动加载 skills/、tools.json）、
         //    toolkit（3 个自研 @Tool）、subagent（content-writer，自动注册 spawn/task 委派工具）
-        HarnessAgent agent =
+        HarnessAgent.Builder agentBuilder =
                 HarnessAgent.builder()
                         .name("wechat-publisher")
                         .sysPrompt(
@@ -134,9 +157,12 @@ public class WeChatPublisher {
                         // 无人值守 demo：BYPASS 全部放行，避免 MCP/subagent 工具卡在 HITL 确认
                         // （DONT_ASK 会把 ASK 降级成 DENY，不适用；这里要 BYPASS）
                         .permissionContext(
-                                PermissionContextState.builder().mode(PermissionMode.BYPASS).build())
-                        .maxIters(40)
-                        .build();
+                                PermissionContextState.builder().mode(PermissionMode.BYPASS).build());
+        // 平台下发：若配了外部 git skill 仓，挂到 agent（agent 即可加载平台下发的 skill）
+        if (platformRepo != null) {
+            agentBuilder.skillRepository(platformRepo);
+        }
+        HarnessAgent agent = agentBuilder.maxIters(40).build();
 
         // 6) 跑一个选题（参数传入或用默认）
         String topic = args.length > 0 ? String.join(" ", args) : DEFAULT_TOPIC;
