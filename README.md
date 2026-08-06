@@ -118,6 +118,56 @@ PRINT_SKILLS_ONLY=1 mvn exec:java
 
 > **动态化三层次**（源码核实）：① **预置**——workspace 静态加载；② **平台下发**——Git/MySQL/PG/**Nacos** 仓，agent 每次 build/session 拉取，平台改了下次生效（Nacos 带 listener/`AiService` 最接近实时推送）；③ **agent 自助创建**——`enableSkillManageTool` → `skill_manage`（`SkillManageTool.java:256`，6 个 action），运行时 CRUD，但同会话 catalog 静态、要下次 build 才进目录。换后端只换 `AgentSkillRepository` 实现，agent 主流程不动。
 
+## 升级到生产形态（换仓库后端）
+
+上面的 demo 用 Git 仓做平台下发。生产里更常见的是「管理后台在线编辑 skill、改完即生效」——**只换 `AgentSkillRepository` 实现，agent 主流程一行不改**：
+
+**MySQL（管理后台在线运营，改完即生效）**
+
+```xml
+<dependency>
+  <groupId>io.agentscope</groupId>
+  <artifactId>agentscope-extensions-skill-mysql-repository</artifactId>
+  <version>${agentscope.version}</version>
+</dependency>
+```
+
+```java
+import com.zaxxer.hikari.HikariDataSource;
+import io.agentscope.core.skill.repository.mysql.MysqlSkillRepository;
+
+HikariDataSource ds = new HikariDataSource();
+ds.setJdbcUrl("jdbc:mysql://localhost:3306/agentscope");
+ds.setUsername("root");
+ds.setPassword("***");
+// 第二参数 createIfNotExist=true：自动建库建表
+AgentSkillRepository repo = new MysqlSkillRepository(ds, true);
+```
+
+**PostgreSQL**：把上面换成 `PostgresSkillRepository`（构造同 `(DataSource, boolean)`），依赖 `agentscope-extensions-skill-postgresql-repository`。
+
+**Nacos（配置中心，最接近实时推送）**：依赖 `agentscope-extensions-nacos-skill`。Nacos 2.x+ 的 `AiService` 原生支持 skill/工具注册，配合 listener 可做到平台发布 → agent 近实时感知。
+
+```java
+import com.alibaba.nacos.api.ai.AiService;
+import io.agentscope.core.nacos.skill.NacosSkillRepository;
+
+AiService aiService = /* Nacos AI 服务客户端 */;
+AgentSkillRepository repo = new NacosSkillRepository(aiService, "namespace-id");
+```
+
+**挂到 agent（三种后端都一样）**：
+
+```java
+HarnessAgent agent = HarnessAgent.builder()
+        .name("wechat-publisher")
+        // ... 其余配置不变
+        .skillRepository(repo)   // 平台下发的 skill 从这里来
+        .build();
+```
+
+> **选型**：Git = 版本管控 / PR review；MySQL / PG = 管理后台在线编辑、可与业务数据同事务；**Nacos = 配置中心动态下发，带 listener 最接近实时推送**。docs 原话：「MySQL / PostgreSQL / Nacos 动态修改、立即生效」。换后端只换 repo 实现——这就是这套架构解耦的关键，也是企业级 agent 平台「控制平面管 Skill」的落地形态。
+
 ## 排版 skill 来源
 
 排版知识参考 GitHub 上 star >1K 的 [**doocs/md**](https://github.com/doocs/md)（~12.9K star，最主流的微信 Markdown 排版器）的内联样式规则，编码进 `wechat-format` skill 与 `render_wechat_html` 工具。
