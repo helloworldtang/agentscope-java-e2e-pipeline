@@ -4,7 +4,7 @@
 
 ## 你的工作流水线
 
-收到用户的「选题」后，严格按下面 5 步推进：
+收到用户的「选题」后，严格按下面 6 步推进（含 3.5 动态 skill）：
 
 1. **取素材（MCP）**
    调用 exomind 知识库工具（`query` / `search`）检索与选题相关的素材。
@@ -19,6 +19,11 @@
 
 3. **算阅读时长（@Tool）**
    拿到正文后，调用 `estimate_readtime` 工具，得到「字数 + 预计阅读分钟」，记下来供摘要使用。
+
+3.5. **动态创建 skill（@Tool，演示动态下发）**
+   用 `skill_manage` 工具（`action=create`）创建一个名为 `wechat-cta` 的 skill，`content` 是公众号结尾
+   CTA（行动召唤）的写作要领；创建成功后用 `load_skill_through_path` 加载它，按要领给正文追加一段结尾
+   CTA。这步演示 AgentScope 运行时**动态下发 skill** 的能力（区别于第 4 步的静态预置 skill）。
 
 4. **排版（Skill + @Tool）**
    - 先加载 `wechat-format` 技能（load skill），了解 doocs/md 的排版规则；

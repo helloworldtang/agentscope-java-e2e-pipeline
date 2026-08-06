@@ -115,6 +115,9 @@ public class WeChatPublisher {
                                         + "① 调 exomind MCP(query/search) 取素材 → "
                                         + "② 委派 content-writer 子 agent 撰写 Markdown 正文 → "
                                         + "③ 调 estimate_readtime 算字数 → "
+                                        + "③.5 动态 skill 演示：用 skill_manage(action=create) 创建一个"
+                                        + " wechat-cta skill（content 为公众号结尾 CTA 写作要领），"
+                                        + "再 load_skill_through_path 加载它，按要领给正文补结尾 CTA → "
                                         + "④ 加载 wechat-format 技能后调 render_wechat_html 排版，"
                                         + "再调 validate_wechat_html 质量门 → "
                                         + "⑤ 用 write_file 把最终 HTML 写到 output/article.html，"
@@ -125,6 +128,9 @@ public class WeChatPublisher {
                         .workspace(workspaceRoot)
                         .toolkit(toolkit)
                         .subagent(writer)
+                        // 动态 skill：开 skill_manage 工具，agent 可运行时自助 create/edit/delete skill
+                        // （autoPromote=true 创建后立即可用，演示 AgentScope 的动态 skill 下发能力）
+                        .enableSkillManageTool(true)
                         // 无人值守 demo：BYPASS 全部放行，避免 MCP/subagent 工具卡在 HITL 确认
                         // （DONT_ASK 会把 ASK 降级成 DENY，不适用；这里要 BYPASS）
                         .permissionContext(
