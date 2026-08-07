@@ -200,14 +200,31 @@ HarnessAgent agent = HarnessAgent.builder()
 | 多 agent 共享 | 每个 agent 各自打包一份 | 一个仓喂多个 agent，平台改一次全生效 |
 | 内容新鲜度 | 构建时冻结 | `GitSkillRepository(autoSync=true)` 每次读检查远端 HEAD、变了就 pull |
 
-「动态」指的是：**资源在运行时从外部源解析，平台能不重部署 agent 就改变它的内容**。具体靠两点：
+「动态」指的是：**资源在运行时从外部源解析，平台能不重部署 agent 就改变它的内容，且每个新任务都重新解析**。机制（源码核实）：
 
-1. **外部源**——skill/MCP 不再 baked-in 到 agent 产物里，而是 agent 启动/加载时从 git 仓解析。 agent 的镜像/jar 里没有这些 skill，它们是运行时拉取的。
-2. **autoSync 刷新**——`GitSkillRepository(autoSync=true)` 每次读都做一次轻量 remote ref 检查，远端 HEAD 变了就 pull；连长生命周期进程也能持续拿到平台最新状态，不用重启。
+1. **外部源**——skill/MCP 不 baked-in 到 agent 产物，repo 在运行时从 git 仓解析。
+2. **每个 task 重新解析（关键）**——`HarnessSkillMiddleware.onSystemPrompt` 在**每次 `agent.call()`** 都跑（`DynamicSkillMiddleware.java:42` 注释「on every call()」、`ReActAgent.java:609`），它调 `skillsForCall → repo.getAllSkills()`（`HarnessSkillMiddleware.java:313`）。所以每个新任务都重读 repo。
+3. **autoSync**——`GitSkillRepository(autoSync=true).getAllSkills()` 每次检查远端 HEAD、变了就 pull。
 
-> **一个诚实的边界**：这是「**加载时动态**」（每次 build/session 读取时拉最新），不是「**推理中热插拔**」。新建的 skill 要进 agent 的 skill 目录，仍需下一次 build/session 重扫（见前面 skill_manage 的边界）。真正「推到正在跑的推理」需要 listener 机制（Nacos config 带 listener 最接近）。
+**闭环：跨任务的生命周期**——
 
-一句话：**workspace ≈ 编译期常量；git 下发 ≈ 运行时从外部仓库解析、平台可热更新**——这就是它配得上「动态」的原因。
+```
+agent.build() 一次（repo 挂在 agent 实例上，长生命周期，不随任务销毁）
+  task1 → call → onSystemPrompt → getAllSkills(autoSync: 拉平台当前状态) → 重建 catalog → 执行
+  task2 → call → onSystemPrompt → getAllSkills(autoSync: 平台在 task1→task2 间改了就 pull) → 重建 catalog → 执行
+  ……平台 = live source of truth，每个任务都咨询一次
+```
+
+回答两个常被问的问题：
+
+- **下一个任务到来，这个 skill 还在吗？** —— 在。agent 实例和 repo 是长生命周期的，不随任务驱逐；task 2/3 还能拿到。
+- **动态加载的 skill 会影响新任务执行吗？** —— 会，而且是逐任务生效。平台在两任务之间 add / remove / 改 skill，下一个 task 重新解析时立刻看到新版本；task N 的 skill 集 = 平台在该 task 开始时的状态。
+
+> **例外 `frozen`**：`HarnessSkillMiddleware.frozen(...)` 把 skill 集快照一次、之后不再 per-call 重读，给确定性场景（测试 / eval）用。
+>
+> **诚实边界**：这是「**逐任务动态**」（每个 call 重新解析），不是「**单次推理中途热插拔**」（单次模型调用内 skill 集固定）。另：agent 用 `skill_manage` 自建的 skill 走另一条路径（`load_skill_through_path` 的目录枚举），与平台 repo 的 per-call 重解析是两套机制，别混。
+
+一句话：**workspace ≈ 编译期常量；git 下发 ≈ 逐任务从外部仓库重新解析、平台改动下个任务就生效**——这才是它配得上「动态」的原因。
 
 ## 排版 skill 来源
 
