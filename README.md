@@ -118,6 +118,27 @@ PRINT_SKILLS_ONLY=1 mvn exec:java
 
 > **动态化三层次**（源码核实）：① **预置**——workspace 静态加载；② **平台下发**——Git/MySQL/PG/**Nacos** 仓，agent 每次 build/session 拉取，平台改了下次生效（Nacos 带 listener/`AiService` 最接近实时推送）；③ **agent 自助创建**——`enableSkillManageTool` → `skill_manage`（`SkillManageTool.java:256`，6 个 action），运行时 CRUD，但同会话 catalog 静态、要下次 build 才进目录。换后端只换 `AgentSkillRepository` 实现，agent 主流程不动。
 
+## 平台下发 MCP（动态分发 demo）
+
+skill 有开箱的 Git/MySQL/PG/Nacos 仓库（见上），**MCP 没有专门的仓库扩展**——但原语齐全，平台下发 MCP 靠「读平台配置 + 注册原语」自己组装：
+
+- `Toolkit.registerMcpClient()` / `removeMcpClient()`——运行时增删 MCP（源码 `Toolkit.java:538/548`）
+- `McpServerRegistrar.register(toolkit, Map<String,McpServerConfig>)`——静态 helper，阻塞注册（源码 `McpServerRegistrar.java:49`，内部 `buildAsync().block()`）
+
+本 demo 把 MCP 配置也放进同一个 git 平台仓（`mcp-servers.json`），`MCP_FROM_PLATFORM=1` 时从它读 + 注册，并 `disableToolsConfig()`（workspace tools.json 不再自动加载）——MCP 也变成「平台下发、agent 拉取」：
+
+```bash
+bash setup-skill-store.sh                      # 平台仓含 skills/ + mcp-servers.json(exomind)
+export SKILL_GIT_URL=file://.../agentscope-skill-store
+MCP_FROM_PLATFORM=1 PRINT_SKILLS_ONLY=1 mvn exec:java
+# → 📦 平台(git)下发的 MCP: [exomind]，toolkit 含 query/search
+
+# 平台撤销：清空 mcp-servers.json 的 mcpServers + commit
+# → 再跑 → toolkit 无 query/search（MCP 没了）
+```
+
+> **skill vs MCP 的不对称**：skill 平台下发是 turnkey（4 个仓库后端），MCP 是 DIY（原语 + 你自己读平台配置）。这是 AgentScope 当前的一个真实缺口，也是给上游的好反馈点。生产里推荐把 `mcp-servers.json` 放 **Nacos config**（带 listener，平台改 → 近实时刷新 + 重新 registerMcpClient）。
+
 ## 升级到生产形态（换仓库后端）
 
 上面的 demo 用 Git 仓做平台下发。生产里更常见的是「管理后台在线编辑 skill、改完即生效」——**只换 `AgentSkillRepository` 实现，agent 主流程一行不改**：
@@ -167,6 +188,26 @@ HarnessAgent agent = HarnessAgent.builder()
 ```
 
 > **选型**：Git = 版本管控 / PR review；MySQL / PG = 管理后台在线编辑、可与业务数据同事务；**Nacos = 配置中心动态下发，带 listener 最接近实时推送**。docs 原话：「MySQL / PostgreSQL / Nacos 动态修改、立即生效」。换后端只换 repo 实现——这就是这套架构解耦的关键，也是企业级 agent 平台「控制平面管 Skill」的落地形态。
+
+## 为什么「git 下发」算动态加载？
+
+把 skill/MCP 放进 git 仓、agent 从 git 拉，听起来还是「静态文件」——它「动态」在哪？关键是和 **workspace 预置**对比着看：
+
+| 维度 | workspace 预置（静态） | git 仓下发（动态） |
+|---|---|---|
+| 内容住哪 | 打进 agent 的 workspace（部署产物的一部分） | 外部 git 仓（与 agent 部署**解耦**） |
+| 加/改一个 skill | 改 workspace 文件 + **重新构建/重新部署 agent** | 平台 commit 一笔，**agent 不用动** |
+| 多 agent 共享 | 每个 agent 各自打包一份 | 一个仓喂多个 agent，平台改一次全生效 |
+| 内容新鲜度 | 构建时冻结 | `GitSkillRepository(autoSync=true)` 每次读检查远端 HEAD、变了就 pull |
+
+「动态」指的是：**资源在运行时从外部源解析，平台能不重部署 agent 就改变它的内容**。具体靠两点：
+
+1. **外部源**——skill/MCP 不再 baked-in 到 agent 产物里，而是 agent 启动/加载时从 git 仓解析。 agent 的镜像/jar 里没有这些 skill，它们是运行时拉取的。
+2. **autoSync 刷新**——`GitSkillRepository(autoSync=true)` 每次读都做一次轻量 remote ref 检查，远端 HEAD 变了就 pull；连长生命周期进程也能持续拿到平台最新状态，不用重启。
+
+> **一个诚实的边界**：这是「**加载时动态**」（每次 build/session 读取时拉最新），不是「**推理中热插拔**」。新建的 skill 要进 agent 的 skill 目录，仍需下一次 build/session 重扫（见前面 skill_manage 的边界）。真正「推到正在跑的推理」需要 listener 机制（Nacos config 带 listener 最接近）。
+
+一句话：**workspace ≈ 编译期常量；git 下发 ≈ 运行时从外部仓库解析、平台可热更新**——这就是它配得上「动态」的原因。
 
 ## 排版 skill 来源
 
