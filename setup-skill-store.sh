@@ -31,15 +31,35 @@ description: Use this skill when you need a short WeChat-style greeting line. �
 - 点出一个与正文主题相关的钩子。
 EOF
 
+# 平台下发 MCP 配置：mcp-servers.json（与 tools.json 同形状）。
+# MCP_FROM_PLATFORM=1 时，WeChatPublisher 从这里读 + McpServerRegistrar.register，
+# 并 disableToolsConfig（workspace tools.json 不再自动加载），演示「平台下发 MCP」。
+cat > mcp-servers.json <<'EOF'
+{
+  "mcpServers": {
+    "exomind": {
+      "transport": "stdio",
+      "command": "exomind",
+      "args": ["mcp"],
+      "enableTools": ["query", "search"],
+      "initializationTimeout": "PT20S",
+      "timeout": "PT30S"
+    }
+  }
+}
+EOF
+
 git add -A
-git commit -qm "platform: 下发初始 skill platform-greet"
+git commit -qm "platform: 下发初始 skill platform-greet + MCP 配置 mcp-servers.json"
 
 URL="file://$STORE_DIR"
-echo "✓ 平台 skill 仓已初始化: $STORE_DIR"
-echo "  当前已下发 skill: platform-greet"
+echo "✓ 平台仓已初始化: $STORE_DIR"
+echo "  已下发 skill: platform-greet"
+echo "  已下发 MCP:    exomind (mcp-servers.json)"
 echo ""
 echo "下一步（把这行加到 .env 或直接 export）："
 echo "  export SKILL_GIT_URL=$URL"
 echo ""
 echo "快速验证平台下发（不跑 agent）："
-echo "  PRINT_SKILLS_ONLY=1 mvn -q exec:java"
+echo "  PRINT_SKILLS_ONLY=1 mvn -q exec:java            # 验证 skill 下发"
+echo "  MCP_FROM_PLATFORM=1 PRINT_SKILLS_ONLY=1 mvn -q exec:java   # 连 MCP 下发一起验证"

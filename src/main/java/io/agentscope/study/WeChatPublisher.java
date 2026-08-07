@@ -1,5 +1,8 @@
 package io.agentscope.study;
 
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.agentscope.core.agent.RuntimeContext;
 import io.agentscope.core.event.AgentEvent;
 import io.agentscope.core.event.TextBlockDeltaEvent;
@@ -13,12 +16,16 @@ import io.agentscope.core.tool.Toolkit;
 import io.agentscope.extensions.model.openai.OpenAIChatModel;
 import io.agentscope.harness.agent.HarnessAgent;
 import io.agentscope.harness.agent.subagent.SubagentDeclaration;
+import io.agentscope.harness.agent.tools.McpServerConfig;
+import io.agentscope.harness.agent.tools.McpServerRegistrar;
 import java.io.IOException;
 import java.io.InputStream;
+import java.net.URI;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.List;
+import java.util.Map;
 
 /**
  * AgentScope Java 2.0 端到端 Demo：微信公众号排版 Agent。
@@ -97,24 +104,52 @@ public class WeChatPublisher {
         Toolkit toolkit = new Toolkit();
         toolkit.registerTool(new PublisherToolkit());
 
-        // 3.5) 平台下发 skill：从外部 git skill 仓加载（模拟 agent 管理平台维护的 skill 存储）。
-        //      SKILL_GIT_URL 未设则跳过（demo 退回 workspace 静态加载）。
-        //      PRINT_SKILLS_ONLY=1 只验证下发（打印平台 skill 列表）、不跑 agent，便于快速演示「下发」。
+        // 3.5) 平台下发：skill（git 仓的 skills/）+ MCP（git 仓的 mcp-servers.json）。
+        //      模拟「agent 管理平台」维护资源存储、agent 从平台拉取。
+        //      - SKILL_GIT_URL 未设 → 退回 workspace 静态加载（默认）。
+        //      - MCP_FROM_PLATFORM=1 → 从平台仓读 mcp-servers.json + McpServerRegistrar.register，
+        //        并在 build 时 disableToolsConfig（workspace tools.json 不再自动加载），MCP 只从平台来。
+        //      - PRINT_SKILLS_ONLY=1 → 只验证平台下发（含 MCP）、不跑 agent。
         String skillGitUrl = System.getenv("SKILL_GIT_URL");
+        boolean mcpFromPlatform = "1".equals(System.getenv("MCP_FROM_PLATFORM"));
         GitSkillRepository platformRepo = null;
         if (skillGitUrl != null && !skillGitUrl.isBlank()) {
+            // 平台 skill
             platformRepo = new GitSkillRepository(skillGitUrl, null, null, "platform-git", true);
             List<AgentSkill> platformSkills = platformRepo.getAllSkills();
             System.out.println(
                     "📦 平台(git)下发的 skill: "
                             + platformSkills.stream().map(AgentSkill::getName).sorted().toList());
+
+            // 平台 MCP
+            if (mcpFromPlatform) {
+                Path mcpJson = Paths.get(URI.create(skillGitUrl)).resolve("mcp-servers.json");
+                if (Files.isRegularFile(mcpJson)) {
+                    ObjectMapper om =
+                            new ObjectMapper()
+                                    .registerModule(
+                                            new com.fasterxml.jackson.datatype.jsr310
+                                                    .JavaTimeModule());
+                    JsonNode root = om.readTree(Files.readString(mcpJson));
+                    JsonNode serversNode = root.has("mcpServers") ? root.get("mcpServers") : root;
+                    Map<String, McpServerConfig> servers =
+                            om.convertValue(
+                                    serversNode, new TypeReference<Map<String, McpServerConfig>>() {});
+                    System.out.println("📦 平台(git)下发的 MCP: " + servers.keySet());
+                    McpServerRegistrar.register(toolkit, servers); // 阻塞注册到 toolkit
+                } else {
+                    System.out.println("⚠ MCP_FROM_PLATFORM=1 但平台仓无 mcp-servers.json，跳过平台 MCP");
+                }
+            }
+
             if ("1".equals(System.getenv("PRINT_SKILLS_ONLY"))) {
                 System.out.println("(PRINT_SKILLS_ONLY=1 → 只验证平台下发，不跑 agent)");
+                System.out.println("   toolkit 已注册工具: " + toolkit.getToolNames());
                 platformRepo.close();
                 return;
             }
-        } else if ("1".equals(System.getenv("PRINT_SKILLS_ONLY"))) {
-            System.out.println("✗ PRINT_SKILLS_ONLY=1 但未设 SKILL_GIT_URL。请先跑 setup-skill-store.sh。");
+        } else if ("1".equals(System.getenv("PRINT_SKILLS_ONLY")) || mcpFromPlatform) {
+            System.out.println("✗ 需设 SKILL_GIT_URL（平台仓）。请先跑 setup-skill-store.sh。");
             return;
         }
 
@@ -161,6 +196,10 @@ public class WeChatPublisher {
         // 平台下发：若配了外部 git skill 仓，挂到 agent（agent 即可加载平台下发的 skill）
         if (platformRepo != null) {
             agentBuilder.skillRepository(platformRepo);
+        }
+        // MCP 平台下发：禁用 workspace/tools.json 自动加载，MCP 只从平台 mcp-servers.json 来
+        if (mcpFromPlatform) {
+            agentBuilder.disableToolsConfig();
         }
         HarnessAgent agent = agentBuilder.maxIters(40).build();
 
