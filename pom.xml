@@ -19,6 +19,8 @@
         <agentscope.version>2.0.0</agentscope.version>
         <!-- MCP 官方 SDK，由 agentscope BOM 托管为 0.17.0；显式声明避免 classpath 缺失 -->
         <mcp.version>0.17.0</mcp.version>
+        <!-- exec:java 主类：默认 WeChatPublisher，可用 -Dexec.mainClass=X 覆盖（如跑 TwoCallSkillTest） -->
+        <exec.mainClass>io.agentscope.study.WeChatPublisher</exec.mainClass>
     </properties>
 
     <dependencies>
@@ -85,7 +87,7 @@
                 <artifactId>exec-maven-plugin</artifactId>
                 <version>3.1.1</version>
                 <configuration>
-                    <mainClass>io.agentscope.study.WeChatPublisher</mainClass>
+                    <mainClass>${exec.mainClass}</mainClass>
                 </configuration>
             </plugin>
         </plugins>
