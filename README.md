@@ -222,7 +222,7 @@ agent.build() 一次（repo 挂在 agent 实例上，长生命周期，不随任
 
 > **例外 `frozen`**：`HarnessSkillMiddleware.frozen(...)` 把 skill 集快照一次、之后不再 per-call 重读，给确定性场景（测试 / eval）用。
 >
-> **诚实边界**：这是「**逐任务动态**」（每个 call 重新解析），不是「**单次推理中途热插拔**」（单次模型调用内 skill 集固定）。另：agent 用 `skill_manage` 自建的 skill 走另一条路径（`load_skill_through_path` 的目录枚举），与平台 repo 的 per-call 重解析是两套机制，别混。
+> **诚实边界**：这是「**逐任务动态**」（每个 call 重新解析），不是「**单次推理中途热插拔**」（单次模型调用内 skill 集固定）。`skill_manage` 自建的 skill 写进可写的 `WorkspaceSkillRepository`，**和平台 repo 一样走 per-call `getAllSkills`**（可写 repo 同样每次 fresh glob）→ 下一个 task 同样进 catalog、可被 `load_skill_through_path` 加载，不是两套机制。
 
 一句话：**workspace ≈ 编译期常量；git 下发 ≈ 逐任务从外部仓库重新解析、平台改动下个任务就生效**——这才是它配得上「动态」的原因。
 
