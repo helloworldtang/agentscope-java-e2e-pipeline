@@ -3,6 +3,7 @@ target/
 
 # 运行时产物（sessions/memory/output/skills-cache，含运行时检索到的知识库内容，不进库）
 .agentscope/
+output/
 
 # 日志
 *.log
