@@ -1,61 +1,30 @@
 package io.agentscope.study;
 
-import com.fasterxml.jackson.core.type.TypeReference;
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import io.agentscope.core.agent.RuntimeContext;
-import io.agentscope.core.event.AgentEvent;
 import io.agentscope.core.event.TextBlockDeltaEvent;
 import io.agentscope.core.event.ToolCallStartEvent;
 import io.agentscope.core.message.UserMessage;
-import io.agentscope.core.permission.PermissionContextState;
-import io.agentscope.core.permission.PermissionMode;
-import io.agentscope.core.skill.AgentSkill;
-import io.agentscope.core.skill.repository.GitSkillRepository;
-import io.agentscope.core.tool.Toolkit;
-import io.agentscope.extensions.model.openai.OpenAIChatModel;
-import io.agentscope.extensions.redis.state.RedisAgentStateStore;
 import io.agentscope.harness.agent.HarnessAgent;
-import io.lettuce.core.RedisClient;
-import io.agentscope.harness.agent.memory.compaction.CompactionConfig;
-import io.agentscope.harness.agent.subagent.SubagentDeclaration;
-import io.agentscope.harness.agent.tools.McpServerConfig;
-import io.agentscope.harness.agent.tools.McpServerRegistrar;
 import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
-import java.net.URI;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.List;
-import java.util.Map;
 
 /**
- * AgentScope Java 2.0 端到端 Demo：微信公众号排版 Agent。
+ * AgentScope Java 2.0 端到端 Pipeline：微信公众号排版 Agent 的入口（编排层）。
  *
- * <p>一条流水线把 5 个能力全跑通：
+ * <p>main 只负责编排：加载配置 {@link PipelineConfig} → 引导 workspace → 用 {@link AgentFactory} 装配
+ * agent（try-with-resources 管理资源）→ 运行（多轮 REPL 或单跑一个选题）。模型/工具/平台下发/子 agent/
+ * 资源生命周期都收在 AgentFactory 里。
  *
- * <pre>
- *  选题
- *   → ② MCP：调 exomind query/search 取素材
- *   → ③ SubAgent：委派 content-writer 把素材整合成 Markdown 正文
- *   → ③.5 @Tool estimate_readtime：算字数/阅读时长
- *   → ④ Skill wechat-format（知识）+ @Tool render_wechat_html（引擎）：排成微信内联样式 HTML
- *   → ④.5 @Tool validate_wechat_html：微信兼容性质量门
- *   → ⑤ 交付
- * </pre>
- *
- * <p>底层全靠 ReAct 的 function-call 机制：MCP / Skill / SubAgent 都通过 tool_call 触发， PublisherToolkit
- * 里那 3 个是我们亲手写的 @Tool。一个 HarnessAgent 实例 = ReAct 内核 + Harness 外壳。
- *
- * <p>模型：DeepSeek 走 OpenAI 兼容协议（agentscope-core 的 DeepSeekCredential 故意抛异常，源码钦定用
- * OpenAIChatModel 指向 deepseek base_url）。
- *
- * <p>跑法：{@code source .env && mvn exec:java} 或带选题参数 {@code mvn exec:java -Dexec.args="选题"}。
+ * <p>跑法：{@code source .env && mvn exec:java}（默认单跑）；{@code INTERACTIVE=1 mvn exec:java}（多轮）；
+ * {@code -Dexec.args="选题"}（自带选题）。
  */
-public class WeChatPublisher {
+public final class WeChatPublisher {
 
     /** workspace 资源相对路径（启动时从 classpath 复制到运行目录，copy-if-absent）。 */
     private static final List<String> WORKSPACE_RESOURCES =
@@ -69,189 +38,54 @@ public class WeChatPublisher {
             "写一篇介绍 AgentScope Java 2.0 的 Harness 工程化能力（ReActAgent + HarnessAgent + Skill + MCP"
                     + " + SubAgent）的公众号文章，面向 Java 开发者，讲清楚它和生产级 agent 框架的关系。";
 
-    /** content-writer 子 agent 的系统提示（程序化声明，因纯 HarnessAgent 不自动扫描 subagents/*.md）。 */
-    private static final String WRITER_PROMPT =
-            """
-            你是微信公众号【撰稿子 agent】，在独立的上下文里工作。主 agent 会给你：选题 + 素材清单 + 要求。
-            你的任务：把零散素材整合成一篇连贯、结构清晰的 Markdown 正文，作为最终回复返回。
-
-            要求：
-            - 只用素材里确实有的事实，不要编造数据或引用；
-            - 用 Markdown 标准子集：#/##/###、段落、**粗**、`行内代码`、代码块、> 引用、- 列表、[text](url)、--- 分割线；
-            - 中文、口语化、适合公众号读者，默认 1000~1400 字；
-            - 不要做排版（不加内联 CSS、不调排版工具）——那是主 agent 的活；
-            - 完成后把整篇 Markdown 作为最终回复返回，不要多余解释。
-            """;
-
-    public static void main(String[] args) throws Exception {
-        String apiKey = System.getenv("DEEPSEEK_API_KEY");
-        if (apiKey == null || apiKey.isBlank()) {
-            System.err.println("✗ 缺少环境变量 DEEPSEEK_API_KEY（参考 .env.example）");
+    public static void main(String[] args) throws IOException {
+        PipelineConfig config;
+        try {
+            config = PipelineConfig.load();
+        } catch (IllegalStateException e) {
+            System.err.println("✗ " + e.getMessage());
             System.exit(1);
+            return;
         }
-        String baseUrl = envOrDefault("DEEPSEEK_BASE_URL", "https://api.deepseek.com");
-        String modelName = envOrDefault("DEEPSEEK_MODEL", "deepseek-chat");
 
-        // 1) DeepSeek 模型（OpenAI 兼容）
-        OpenAIChatModel model =
-                OpenAIChatModel.builder()
-                        .apiKey(apiKey)
-                        .baseUrl(baseUrl)
-                        .modelName(modelName)
-                        .stream(true)
-                        .build();
-
-        // 2) workspace 引导：classpath/resources/workspace → .agentscope/workspace（copy-if-absent）
         Path workspaceRoot = Paths.get(".agentscope", "workspace").toAbsolutePath().normalize();
         bootstrapWorkspace(workspaceRoot);
 
-        // 3) 自研 @Tool 工具集（function call 直接展示）
-        Toolkit toolkit = new Toolkit();
-        toolkit.registerTool(new PublisherToolkit());
-
-        // 3.5) 平台下发：skill（git 仓的 skills/）+ MCP（git 仓的 mcp-servers.json）。
-        //      模拟「agent 管理平台」维护资源存储、agent 从平台拉取。
-        //      - SKILL_GIT_URL 未设 → 退回 workspace 静态加载（默认）。
-        //      - MCP_FROM_PLATFORM=1 → 从平台仓读 mcp-servers.json + McpServerRegistrar.register，
-        //        并在 build 时 disableToolsConfig（workspace tools.json 不再自动加载），MCP 只从平台来。
-        //      - PRINT_SKILLS_ONLY=1 → 只验证平台下发（含 MCP）、不跑 agent。
-        String skillGitUrl = System.getenv("SKILL_GIT_URL");
-        boolean mcpFromPlatform = "1".equals(System.getenv("MCP_FROM_PLATFORM"));
-        GitSkillRepository platformRepo = null;
-        if (skillGitUrl != null && !skillGitUrl.isBlank()) {
-            // 平台 skill
-            platformRepo = new GitSkillRepository(skillGitUrl, null, null, "platform-git", true);
-            List<AgentSkill> platformSkills = platformRepo.getAllSkills();
-            System.out.println(
-                    "📦 平台(git)下发的 skill: "
-                            + platformSkills.stream().map(AgentSkill::getName).sorted().toList());
-
-            // 平台 MCP
-            if (mcpFromPlatform) {
-                Path mcpJson = Paths.get(URI.create(skillGitUrl)).resolve("mcp-servers.json");
-                if (Files.isRegularFile(mcpJson)) {
-                    ObjectMapper om =
-                            new ObjectMapper()
-                                    .registerModule(
-                                            new com.fasterxml.jackson.datatype.jsr310
-                                                    .JavaTimeModule());
-                    JsonNode root = om.readTree(Files.readString(mcpJson));
-                    JsonNode serversNode = root.has("mcpServers") ? root.get("mcpServers") : root;
-                    Map<String, McpServerConfig> servers =
-                            om.convertValue(
-                                    serversNode, new TypeReference<Map<String, McpServerConfig>>() {});
-                    System.out.println("📦 平台(git)下发的 MCP: " + servers.keySet());
-                    McpServerRegistrar.register(toolkit, servers); // 阻塞注册到 toolkit
-                } else {
-                    System.out.println("⚠ MCP_FROM_PLATFORM=1 但平台仓无 mcp-servers.json，跳过平台 MCP");
-                }
-            }
-
-            if ("1".equals(System.getenv("PRINT_SKILLS_ONLY"))) {
+        // AgentFactory 持有 RedisClient/GitSkillRepository 等资源，try-with-resources 保证释放
+        try (AgentFactory factory = AgentFactory.create(config)) {
+            if (config.printSkillsOnly) {
                 System.out.println("(PRINT_SKILLS_ONLY=1 → 只验证平台下发，不跑 agent)");
-                System.out.println("   toolkit 已注册工具: " + toolkit.getToolNames());
-                platformRepo.close();
+                System.out.println("📦 平台(git)下发的 skill: " + factory.platformSkillNames());
+                System.out.println("   toolkit 已注册工具: " + factory.toolkitToolNames());
                 return;
             }
-        } else if ("1".equals(System.getenv("PRINT_SKILLS_ONLY")) || mcpFromPlatform) {
-            System.out.println("✗ 需设 SKILL_GIT_URL（平台仓）。请先跑 setup-skill-store.sh。");
-            return;
+
+            HarnessAgent agent = factory.build(workspaceRoot);
+            RuntimeContext ctx =
+                    RuntimeContext.builder()
+                            .sessionId(config.sessionId)
+                            .userId("publisher")
+                            .build();
+
+            System.out.println("================ 微信公众号排版 Agent ================");
+            System.out.println("模型: " + config.deepseekModel + " @ " + config.deepseekBaseUrl);
+            System.out.println("workspace: " + workspaceRoot);
+            System.out.println(
+                    "sessionId: "
+                            + config.sessionId
+                            + "（同 id 跨轮/跨重启记得上下文；REDIS_STATE=1 时存 Redis）");
+            System.out.println("=====================================================\n");
+
+            if (config.interactive) {
+                interactiveRepl(agent, ctx);
+                return;
+            }
+            String topic = args.length > 0 ? String.join(" ", args) : DEFAULT_TOPIC;
+            System.out.println("选题: " + topic + "\n");
+            StringBuilder delivered = new StringBuilder();
+            replyOnce(agent, ctx, new UserMessage(topic), delivered);
+            writeDeliverable(workspaceRoot, delivered.toString());
         }
-
-        // 4) SubAgent 程序化声明（content-writer 撰稿员，继承父 DeepSeek 模型）
-        SubagentDeclaration writer =
-                SubagentDeclaration.builder()
-                        .name("content-writer")
-                        .description(
-                                "把选题 + 素材清单整合成结构化微信公众号 Markdown 正文。需要撰稿时委派给它。")
-                        .inlineAgentsBody(WRITER_PROMPT)
-                        .maxIters(12)
-                        .build();
-
-        // 5) HarnessAgent（= ReAct 内核 + Harness 外壳）：挂 workspace（自动加载 skills/、tools.json）、
-        //    toolkit（3 个自研 @Tool）、subagent（content-writer，自动注册 spawn/task 委派工具）
-        HarnessAgent.Builder agentBuilder =
-                HarnessAgent.builder()
-                        .name("wechat-publisher")
-                        .sysPrompt(
-                                "你是微信公众号内容编排 Agent（主编）。严格按流水线推进："
-                                        + "① 调 exomind MCP(query/search) 取素材 → "
-                                        + "② 委派 content-writer 子 agent 撰写 Markdown 正文 → "
-                                        + "③ 调 estimate_readtime 算字数 → "
-                                        + "③.5 动态 skill 演示：用 skill_manage(action=create) 创建一个"
-                                        + " wechat-cta skill（content 为公众号结尾 CTA 写作要领），"
-                                        + "再 load_skill_through_path 加载它，按要领给正文补结尾 CTA → "
-                                        + "④ 加载 wechat-format 技能后调 render_wechat_html 排版，"
-                                        + "再调 validate_wechat_html 质量门 → "
-                                        + "⑤ 用 write_file 把最终 HTML 写到 output/article.html，"
-                                        + "再调 publish_to_wechat 把标题+Markdown 正文投递到公众号草稿箱（未设"
-                                        + " PUBLISH_ACCOUNT 会自动跳过、仅留本地文件），最后交付标题+摘要+路径。"
-                                        + "子 agent 上下文隔离，委派时务必带全素材。全程中文。")
-                        .model(model)
-                        .workspace(workspaceRoot)
-                        .toolkit(toolkit)
-                        .subagent(writer)
-                        // 动态 skill：开 skill_manage 工具，agent 可运行时自助 create/edit/delete skill
-                        // （autoPromote=true 创建后立即可用，演示 AgentScope 的动态 skill 下发能力）
-                        .enableSkillManageTool(true)
-                        // 无人值守 demo：BYPASS 全部放行，避免 MCP/subagent 工具卡在 HITL 确认
-                        // （DONT_ASK 会把 ASK 降级成 DENY，不适用；这里要 BYPASS）
-                        .permissionContext(
-                                PermissionContextState.builder().mode(PermissionMode.BYPASS).build());
-        // 平台下发：若配了外部 git skill 仓，挂到 agent（agent 即可加载平台下发的 skill）
-        if (platformRepo != null) {
-            agentBuilder.skillRepository(platformRepo);
-        }
-        // MCP 平台下发：禁用 workspace/tools.json 自动加载，MCP 只从平台 mcp-servers.json 来
-        if (mcpFromPlatform) {
-            agentBuilder.disableToolsConfig();
-        }
-        // 多轮会话状态：REDIS_STATE=1 时用 RedisAgentStateStore（Lettuce→localhost:6379），
-        // 按 (userId,sessionId) 存对话状态——多轮 + 跨进程重启记得（默认 JsonFile 也行，Redis 更生产级）
-        if ("1".equals(System.getenv("REDIS_STATE"))) {
-            RedisClient lettuce = RedisClient.create("redis://localhost:6379");
-            agentBuilder.stateStore(
-                    RedisAgentStateStore.builder()
-                            .lettuceClient(lettuce)
-                            .keyPrefix("agentscope:wechat-publisher:")
-                            .build());
-        }
-        // 长期记忆：超 30 条压缩蒸馏 → workspace/memory/ → MEMORY.md，下一轮注入 system prompt
-        agentBuilder.compaction(
-                CompactionConfig.builder().triggerMessages(30).keepMessages(10).build());
-        HarnessAgent agent = agentBuilder.maxIters(40).build();
-
-        // 6) 运行：INTERACTIVE=1 走多轮 REPL（同 sessionId，Redis/AgentState 跨轮+跨重启记得）；否则单跑一个选题
-        String sessionId = envOrDefault("SESSION_ID", "publisher-1");
-        RuntimeContext ctx =
-                RuntimeContext.builder().sessionId(sessionId).userId("publisher").build();
-
-        System.out.println("================ 微信公众号排版 Agent ================");
-        System.out.println("模型: " + modelName + " @ " + baseUrl);
-        System.out.println("workspace: " + workspaceRoot);
-        System.out.println(
-                "sessionId: "
-                        + sessionId
-                        + "（同 id 跨轮/跨重启记得上下文；REDIS_STATE=1 时存 Redis）");
-        System.out.println("=====================================================\n");
-
-        if ("1".equals(System.getenv("INTERACTIVE"))) {
-            interactiveRepl(agent, ctx);
-            return;
-        }
-
-        String topic = args.length > 0 ? String.join(" ", args) : DEFAULT_TOPIC;
-        System.out.println("选题: " + topic + "\n");
-        StringBuilder delivered = new StringBuilder();
-        replyOnce(agent, ctx, new UserMessage(topic), delivered);
-
-        // 7) 落盘 agent 最终交付文本
-        Path output = workspaceRoot.resolve("output").resolve("agent_deliverable.md");
-        Files.createDirectories(output.getParent());
-        Files.writeString(output, delivered.toString());
-        System.out.println("\n\n=====================================================");
-        System.out.println("✓ 完成。Agent 交付文本已保存: " + output);
-        System.out.println("  workspace 下还可见 sessions/、memory/ 等运行时产物。");
     }
 
     /** 单轮回复：流式打印模型文本 + 工具调用，累计交付文本。AgentState 在结束时自动写回。 */
@@ -272,8 +106,8 @@ public class WeChatPublisher {
     }
 
     /**
-     * 交互式多轮 REPL：同一个 sessionId 循环，跨轮（甚至跨进程重启，REDIS_STATE=1 时）记得上下文。
-     * 适合「写稿 → 改标题 → 加段落 → 换个角度再写一篇」连续 refine。输 exit 退出。
+     * 交互式多轮 REPL：同一 sessionId 循环，跨轮（甚至跨进程重启，REDIS_STATE=1 时）记得上下文。
+     * 适合「写稿 → 改标题 → 加段落」连续 refine。输 exit 退出。
      */
     private static void interactiveRepl(HarnessAgent agent, RuntimeContext ctx) throws IOException {
         System.out.println(
@@ -293,8 +127,16 @@ public class WeChatPublisher {
             }
             System.out.print("\nAgent: ");
             replyOnce(agent, ctx, new UserMessage(line.trim()), new StringBuilder());
-            // AgentState 在 call 结束自动写回 → 下一轮（或下次重启同 sessionId）仍记得本轮
         }
+    }
+
+    private static void writeDeliverable(Path workspaceRoot, String text) throws IOException {
+        Path output = workspaceRoot.resolve("output").resolve("agent_deliverable.md");
+        Files.createDirectories(output.getParent());
+        Files.writeString(output, text);
+        System.out.println("\n\n=====================================================");
+        System.out.println("✓ 完成。Agent 交付文本已保存: " + output);
+        System.out.println("  workspace 下还可见 sessions/、memory/ 等运行时产物。");
     }
 
     /** 把 classpath 下的 workspace 资源复制到运行目录（已存在则跳过，不覆盖用户改动）。 */
@@ -317,8 +159,5 @@ public class WeChatPublisher {
         }
     }
 
-    private static String envOrDefault(String name, String fallback) {
-        String v = System.getenv(name);
-        return (v == null || v.isBlank()) ? fallback : v;
-    }
+    private WeChatPublisher() {}
 }

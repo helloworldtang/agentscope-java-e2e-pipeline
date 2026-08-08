@@ -1,7 +1,6 @@
 package io.agentscope.study;
 
 import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.agentscope.core.tool.Tool;
@@ -157,10 +156,9 @@ public class PublisherToolkit {
         if (lower.contains("class=\"") || lower.contains("class='")) {
             warnings.add("发现 class 属性：公众号会剥离 class，样式应全部走 inline style");
         }
-        if (lower.contains("style=\"") || lower.contains("style='")) {
-            // 有 inline style，符合预期
-        } else if (!errors.isEmpty()) {
-            warnings.add("未检测到 inline style，排版可能不生效");
+        boolean hasInlineStyle = lower.contains("style=\"") || lower.contains("style='");
+        if (!hasInlineStyle) {
+            warnings.add("未检测到 inline style，公众号样式可能不生效（微信只认 inline style）");
         }
 
         StringBuilder sb = new StringBuilder();
@@ -202,24 +200,26 @@ public class PublisherToolkit {
             return "SKIP: 未设置 PUBLISH_ACCOUNT 环境变量，发布已跳过（仅产出本地 article.html）。"
                     + "如需投递，设置 PUBLISH_ACCOUNT=<公众号名> 后重跑。";
         }
+        if (title == null || title.isBlank() || markdown == null || markdown.isBlank()) {
+            return "FAIL: title 和 markdown 都不能为空";
+        }
         try {
             // 读 exomind 凭据（~/.exomind/config.json）
             Path cfg = Paths.get(System.getProperty("user.home"), ".exomind", "config.json");
             if (!Files.isRegularFile(cfg)) {
                 return "SKIP: 未找到 ~/.exomind/config.json（exomind 未登录），发布已跳过。";
             }
-            ObjectMapper om = new ObjectMapper();
-            JsonNode cred = om.readTree(Files.readString(cfg));
+            JsonNode cred = Json.MAPPER.readTree(Files.readString(cfg));
             String base = cred.get("base_url").asText();
             String apiKey = cred.get("api_key").asText();
 
             // ① POST /drafts 注入 Markdown 正文
-            ObjectNode body = om.createObjectNode();
+            ObjectNode body = Json.MAPPER.createObjectNode();
             body.put("title", title);
             body.put("content", markdown);
             body.put("target_account", account);
             body.put("topic", title);
-            body.set("tags", om.createArrayNode().add("AgentScope Java").add("Agent"));
+            body.set("tags", Json.MAPPER.createArrayNode().add("AgentScope Java").add("Agent"));
 
             HttpClient client = HttpClient.newHttpClient();
             HttpRequest req =
@@ -228,14 +228,14 @@ public class PublisherToolkit {
                             .timeout(java.time.Duration.ofSeconds(30))
                             .header("Authorization", "Bearer " + apiKey)
                             .header("Content-Type", "application/json")
-                            .POST(HttpRequest.BodyPublishers.ofString(om.writeValueAsString(body)))
+                            .POST(HttpRequest.BodyPublishers.ofString(Json.MAPPER.writeValueAsString(body)))
                             .build();
             HttpResponse<String> res = client.send(req, HttpResponse.BodyHandlers.ofString());
             if (res.statusCode() >= 300) {
                 return "FAIL: POST /drafts HTTP " + res.statusCode() + " "
                         + res.body().substring(0, Math.min(200, res.body().length()));
             }
-            String draftId = om.readTree(res.body()).get("id").asText();
+            String draftId = Json.MAPPER.readTree(res.body()).get("id").asText();
 
             // ② exomind draft wechat <id> --account <account>（AI 异步出封面 + 调微信，落到草稿箱不群发）
             Process process =
@@ -271,9 +271,9 @@ public class PublisherToolkit {
 
     /** 给形如 {@code <tag>} 的开标签加 style（commonmark 默认不在这些标签上输出属性）。 */
     private static String addStyleToTag(String html, String tag, String style) {
-        // 仅匹配没有已存在属性的裸开标签：<tag>
-        Pattern p = Pattern.compile("(?i)<(" + tag + ")>(?!\\s*<code>)");
-        // 上面 (?!\\s*<code>) 仅对 pre 有意义，对其它标签无害（其它标签后很少紧跟 <code>）
+        // 匹配没有已存在属性的裸开标签：<tag>。注意：不能加「后面不跟 <code>」的前瞻——
+        // 那会让 <pre><code> 代码块的 <pre> 拿不到深色背景样式（曾因此 bug 代码块渲染坏掉）。
+        Pattern p = Pattern.compile("(?i)<(" + tag + ")>");
         Matcher m = p.matcher(html);
         StringBuffer sb = new StringBuffer();
         while (m.find()) {

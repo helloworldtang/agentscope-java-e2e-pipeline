@@ -79,6 +79,39 @@ mvn exec:java -Dexec.args="写一篇讲 RAG 在企业落地踩坑的公众号文
 - `io.modelcontextprotocol.sdk:mcp:0.17.0`（exomind MCP stdio 客户端）
 - `org.commonmark:commonmark:0.22.0`（render_wechat_html 的 Markdown 解析）
 
+## 多轮会话与记忆（Redis + MEMORY.md）
+
+AgentScope 的记忆分两层，本 demo 都开了：
+
+- **多轮会话（短期，按 sessionId）**：agent 实例调用间无状态，靠 `RuntimeContext(sessionId, userId)` 做 key。`REDIS_STATE=1` 时用 `RedisAgentStateStore`（Lettuce→localhost:6379）存 `AgentState`——多轮 + **跨进程重启**记得（默认 JsonFile 也行，Redis 更生产级、多副本可共享）。
+- **跨会话长期（MEMORY.md）**：`compaction(30/10)`——会话超 30 条压缩蒸馏 → `workspace/memory/` → `MEMORY.md`，下一轮注入 system prompt。`memory_save`/`memory_get`/`memory_search` 工具 agent 可显式存取。
+
+```bash
+# 多轮 REPL（同 sessionId，写稿→改标题→加段落 连续 refine）
+INTERACTIVE=1 mvn exec:java
+INTERACTIVE=1 REDIS_STATE=1 SESSION_ID=my-article mvn exec:java   # 跨重启也记得
+```
+
+> **实测**：turn1 写稿起标题 → turn2 问「标题是什么」，零工具调用 1 秒直答召回（`messages=29` 从 Redis 加载）；**全新 JVM 同 sessionId** 跨重启仍精确召回。多轮 + 跨重启双铁证。
+
+## 项目结构（重构后）
+
+按 [addyosmani/agent-skills](https://github.com/addyosmani/agent-skills)（84K⭐）的 code-review/code-simplification/TDD 四 skill 重构过，职责分层：
+
+```
+src/main/java/io/agentscope/study/
+  WeChatPublisher.java   入口（编排）：config→workspace→AgentFactory→run   163 行（原 324）
+  PipelineConfig.java    env 配置集中加载                                   107 行
+  AgentFactory.java      AutoCloseable：构建 model+toolkit+平台下发+subagent+
+                         agent + 管 RedisClient/GitSkillRepository 生命周期   199 行
+  PublisherToolkit.java  4 个自研 @Tool（estimate/render/validate/publish）  304 行
+  Json.java              共享 ObjectMapper（带 JavaTimeModule）
+src/test/java/io/agentscope/study/
+  PublisherToolkitTest.java  10 个单元测试（render/validate/estimate 纯函数）
+```
+
+重构要点：① 主类拆分（main 只编排）；② 资源用 try-with-resources 关（修 RedisClient/GitRepo 泄漏）；③ 加 10 个单测（TDD 抓到并修了代码块 `<pre>` 拿不到深色背景的真 bug）；④ 共享 ObjectMapper、入参校验、validate 逻辑修正。`mvn test` 全过。
+
 ## exomind：个人知识库 + 公众号写作投递引擎
 
 本 pipeline 的 MCP 素材源用的是 **[exomind](https://youhuale.cn)**（网站：https://youhuale.cn ）——一个个人知识库引擎：
