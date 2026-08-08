@@ -46,6 +46,13 @@
             <version>${agentscope.version}</version>
         </dependency>
 
+        <!-- 多轮会话状态：RedisAgentStateStore（Lettuce），按 (userId,sessionId) 存对话状态，跨重启/多副本 -->
+        <dependency>
+            <groupId>io.agentscope</groupId>
+            <artifactId>agentscope-extensions-redis</artifactId>
+            <version>${agentscope.version}</version>
+        </dependency>
+
         <!-- MCP stdio transport：连接本地 exomind mcp 服务 -->
         <dependency>
             <groupId>io.modelcontextprotocol.sdk</groupId>

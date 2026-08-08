@@ -14,12 +14,17 @@ import io.agentscope.core.skill.AgentSkill;
 import io.agentscope.core.skill.repository.GitSkillRepository;
 import io.agentscope.core.tool.Toolkit;
 import io.agentscope.extensions.model.openai.OpenAIChatModel;
+import io.agentscope.extensions.redis.state.RedisAgentStateStore;
 import io.agentscope.harness.agent.HarnessAgent;
+import io.lettuce.core.RedisClient;
+import io.agentscope.harness.agent.memory.compaction.CompactionConfig;
 import io.agentscope.harness.agent.subagent.SubagentDeclaration;
 import io.agentscope.harness.agent.tools.McpServerConfig;
 import io.agentscope.harness.agent.tools.McpServerRegistrar;
+import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.InputStreamReader;
 import java.net.URI;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -201,37 +206,44 @@ public class WeChatPublisher {
         if (mcpFromPlatform) {
             agentBuilder.disableToolsConfig();
         }
+        // 多轮会话状态：REDIS_STATE=1 时用 RedisAgentStateStore（Lettuce→localhost:6379），
+        // 按 (userId,sessionId) 存对话状态——多轮 + 跨进程重启记得（默认 JsonFile 也行，Redis 更生产级）
+        if ("1".equals(System.getenv("REDIS_STATE"))) {
+            RedisClient lettuce = RedisClient.create("redis://localhost:6379");
+            agentBuilder.stateStore(
+                    RedisAgentStateStore.builder()
+                            .lettuceClient(lettuce)
+                            .keyPrefix("agentscope:wechat-publisher:")
+                            .build());
+        }
+        // 长期记忆：超 30 条压缩蒸馏 → workspace/memory/ → MEMORY.md，下一轮注入 system prompt
+        agentBuilder.compaction(
+                CompactionConfig.builder().triggerMessages(30).keepMessages(10).build());
         HarnessAgent agent = agentBuilder.maxIters(40).build();
 
-        // 6) 跑一个选题（参数传入或用默认）
-        String topic = args.length > 0 ? String.join(" ", args) : DEFAULT_TOPIC;
+        // 6) 运行：INTERACTIVE=1 走多轮 REPL（同 sessionId，Redis/AgentState 跨轮+跨重启记得）；否则单跑一个选题
+        String sessionId = envOrDefault("SESSION_ID", "publisher-1");
         RuntimeContext ctx =
-                RuntimeContext.builder()
-                        .sessionId("publisher-1")
-                        .userId("publisher")
-                        .build();
+                RuntimeContext.builder().sessionId(sessionId).userId("publisher").build();
 
         System.out.println("================ 微信公众号排版 Agent ================");
         System.out.println("模型: " + modelName + " @ " + baseUrl);
         System.out.println("workspace: " + workspaceRoot);
-        System.out.println("选题: " + topic);
+        System.out.println(
+                "sessionId: "
+                        + sessionId
+                        + "（同 id 跨轮/跨重启记得上下文；REDIS_STATE=1 时存 Redis）");
         System.out.println("=====================================================\n");
 
+        if ("1".equals(System.getenv("INTERACTIVE"))) {
+            interactiveRepl(agent, ctx);
+            return;
+        }
+
+        String topic = args.length > 0 ? String.join(" ", args) : DEFAULT_TOPIC;
+        System.out.println("选题: " + topic + "\n");
         StringBuilder delivered = new StringBuilder();
-        agent.streamEvents(new UserMessage(topic), ctx)
-                .doOnNext(
-                        event -> {
-                            if (event instanceof TextBlockDeltaEvent d) {
-                                // 模型流式文本片段（推理过程 + 最终交付）
-                                System.out.print(d.getDelta());
-                                delivered.append(d.getDelta());
-                            } else if (event instanceof ToolCallStartEvent t) {
-                                // function call 可见性：每次工具调用实时打印
-                                System.out.println("\n[🔧 工具调用] " + t.getToolCallName());
-                            }
-                        })
-                .doOnError(e -> System.err.println("\n[✗ 异常] " + e.getMessage()))
-                .blockLast();
+        replyOnce(agent, ctx, new UserMessage(topic), delivered);
 
         // 7) 落盘 agent 最终交付文本
         Path output = workspaceRoot.resolve("output").resolve("agent_deliverable.md");
@@ -240,6 +252,49 @@ public class WeChatPublisher {
         System.out.println("\n\n=====================================================");
         System.out.println("✓ 完成。Agent 交付文本已保存: " + output);
         System.out.println("  workspace 下还可见 sessions/、memory/ 等运行时产物。");
+    }
+
+    /** 单轮回复：流式打印模型文本 + 工具调用，累计交付文本。AgentState 在结束时自动写回。 */
+    private static void replyOnce(
+            HarnessAgent agent, RuntimeContext ctx, UserMessage msg, StringBuilder delivered) {
+        agent.streamEvents(msg, ctx)
+                .doOnNext(
+                        event -> {
+                            if (event instanceof TextBlockDeltaEvent d) {
+                                System.out.print(d.getDelta());
+                                delivered.append(d.getDelta());
+                            } else if (event instanceof ToolCallStartEvent t) {
+                                System.out.println("\n[🔧 工具调用] " + t.getToolCallName());
+                            }
+                        })
+                .doOnError(e -> System.err.println("\n[✗ 异常] " + e.getMessage()))
+                .blockLast();
+    }
+
+    /**
+     * 交互式多轮 REPL：同一个 sessionId 循环，跨轮（甚至跨进程重启，REDIS_STATE=1 时）记得上下文。
+     * 适合「写稿 → 改标题 → 加段落 → 换个角度再写一篇」连续 refine。输 exit 退出。
+     */
+    private static void interactiveRepl(HarnessAgent agent, RuntimeContext ctx) throws IOException {
+        System.out.println(
+                "交互多轮模式（sessionId="
+                        + ctx.getSessionId()
+                        + "）。输入选题/修改指令多轮 refine；输 exit 退出。");
+        BufferedReader reader = new BufferedReader(new InputStreamReader(System.in));
+        while (true) {
+            System.out.print("\n你: ");
+            String line = reader.readLine();
+            if (line == null || line.trim().equalsIgnoreCase("exit")) {
+                System.out.println("\n再见。会话状态已持久化，下次同 sessionId 继续。");
+                return;
+            }
+            if (line.isBlank()) {
+                continue;
+            }
+            System.out.print("\nAgent: ");
+            replyOnce(agent, ctx, new UserMessage(line.trim()), new StringBuilder());
+            // AgentState 在 call 结束自动写回 → 下一轮（或下次重启同 sessionId）仍记得本轮
+        }
     }
 
     /** 把 classpath 下的 workspace 资源复制到运行目录（已存在则跳过，不覆盖用户改动）。 */
